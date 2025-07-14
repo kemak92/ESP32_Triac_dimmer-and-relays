@@ -1,0 +1,159 @@
+substitutions:
+  name: "test"
+  api_pass: ""
+  ota_pass: ""
+  slave_id: "4"
+  modbus_baud_rate: "9600"
+  modbus_stop_bits: "1"
+  modbus_data_bits: "8"
+  modbus_parity: "NONE"
+  modbus_rx_buffer_size: "1500"
+  modbus_direction: "BOTH"
+  eth_ip: "192.168.1.102"
+  eth_gateway: "192.168.1.1"
+  eth_subnet: "255.255.255.0"
+  user: admin
+  pass: admin
+  i2c_address_in: "0x20"
+  i2c_address_out: "0x27"
+  i2c_frequency: "400kHz"
+
+esphome:
+  name: "${name}"
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+external_components:
+  - source: github://epiclabs-io/esphome-modbus-server@master
+    refresh: 60s
+    components:
+      - modbus_server
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Gg Fallback Hotspot"
+    password: "v2qDtauPY7kh"
+  manual_ip:
+    static_ip: ${eth_ip}
+    gateway: ${eth_gateway}
+    subnet: ${eth_subnet}
+
+captive_portal:
+logger:
+  logs:
+    component: ERROR
+
+api:
+  encryption:
+    key: ${api_pass}
+
+ota:
+  platform: esphome
+  password: ${ota_pass}
+
+web_server:
+  port: 80
+  auth:
+    username: ${user}
+    password: ${pass}
+
+i2c:
+  sda: 5
+  scl: 16
+  scan: true
+  id: bus_a
+  frequency: ${i2c_frequency}
+
+pcf8574:
+  - id: 'pcf8574_hub_out_1'
+    i2c_id: bus_a
+    address: ${i2c_address_out}
+    pcf8575: true
+  - id: 'pcf8574_hub_in_1'
+    i2c_id: bus_a
+    address: ${i2c_address_in}
+    pcf8575: true
+
+uart:
+  - id: intmodbus
+    tx_pin: 14
+    rx_pin: 13
+    baud_rate: ${modbus_baud_rate}
+    stop_bits: ${modbus_stop_bits}
+    data_bits: ${modbus_data_bits}
+    parity: ${modbus_parity}
+    rx_buffer_size: ${modbus_rx_buffer_size}
+    debug:
+      direction: ${modbus_direction}
+
+modbus_server:
+  - id: modbuserver
+    uart_id: intmodbus
+    address: ${slave_id}  # Sử dụng slave_id từ substitutions
+    holding_registers:
+      - start_address: 40001
+        default: 2500
+        number: 1
+        on_write: |-
+          ESP_LOGD("MODBUS", "Target temperature set to: %d", value);
+          id(target_temperature).publish_state(value / 100.0);  // Sử dụng publish_state
+          return true;  // Xác nhận ghi thành công
+      - start_address: 40002
+        default: 0
+        number: 1
+        on_read: |-
+          int temp = id(current_temperature).state * 100;
+          ESP_LOGD("MODBUS", "Current temperature read: %d", temp);
+          return temp;  // Trả về giá trị nhiệt độ hiện tại
+
+sensor:
+  - platform: dht
+    pin: 2
+    model: DHT22
+    temperature:
+      id: current_temperature
+      name: "Current Temperature"
+      on_value:
+        then:
+          - lambda: |-
+              ESP_LOGD("SENSOR", "Temperature updated: %.2f°C", x);
+              // Xóa return {} vì lambda này không cần trả về giá trị
+
+number:
+  - platform: template
+    id: target_temperature
+    name: "Target Temperature"
+    min_value: 15.0
+    max_value: 35.0
+    step: 0.1
+    optimistic: true
+    unit_of_measurement: "°C"
+
+switch:
+  - platform: gpio
+    name: ${name} U2-P00
+    id: relay_switch
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 0
+      mode: OUTPUT
+      inverted: true
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          float current_temp = 28; //id(current_temperature).state;
+          float target_temp = id(target_temperature).state;
+          if (current_temp > target_temp + 0.5) {
+            id(relay_switch).turn_on();
+            ESP_LOGD("CONTROL", "Turn on fan: Current=%.2f, Target=%.2f", current_temp, target_temp);
+          } else if (current_temp < target_temp - 0.5) {
+            id(relay_switch).turn_off();
+            ESP_LOGD("CONTROL", "Turn off fan: Current=%.2f, Target=%.2f", current_temp, target_temp);
+          }
+          // Xóa return {} vì lambda này không cần trả về giá trị
